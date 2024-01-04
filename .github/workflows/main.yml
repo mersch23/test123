@@ -22,7 +22,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Sync up codeCommit
-        uses: mersch23/test123@
+        uses: mersch23/test123@main
         with:
           repository_name: DemoGitRepo
           aws_region: us-east-1
