@@ -1,0 +1,13 @@
+name: mersch job
+
+on: push
+
+jobs:
+    build:
+      runs-on: ubuntu-latest
+
+      steps:
+       - uses: actions/checkout@4
+        
+       - name: Run sample mersch action
+         run: echo " Jesus is king of kings"
