@@ -1,0 +1,190 @@
+pipeline {
+    agent any
+    
+    parameters {
+        choice(
+            name: 'DEPLOYMENT_ENV',
+            choices: ['dev', 'staging', 'prod'],
+            description: 'Deployment environment'
+        )
+        booleanParam(
+            name: 'DELETE_EXISTING',
+            defaultValue: false,
+            description: 'Delete existing files in S3 before upload'
+        )
+    }
+    
+    environment {
+        S3_BUCKET = 'mersch0823'
+        SOURCE_FOLDER = 'louisejean'
+        AWS_DEFAULT_REGION = 'us-east-1'
+        S3_PREFIX = "${params.DEPLOYMENT_ENV}/"
+    }
+    
+    stages {
+        stage('Environment Info') {
+            steps {
+                echo "Ì∫Ä Starting deployment to: ${params.DEPLOYMENT_ENV}"
+                echo "Ì≥Å Source folder: ${SOURCE_FOLDER}"
+                echo "Ì∫£ Target S3 bucket: ${S3_BUCKET}"
+                echo "Ì≥ç S3 prefix: ${S3_PREFIX}"
+                echo "Ì∑ëÔ∏è Delete existing: ${params.DELETE_EXISTING}"
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                echo 'Ì≥• Checking out source code...'
+                checkout scm
+                
+                script {
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                    env.BUILD_TIMESTAMP = sh(
+                        script: 'date "+%Y%m%d-%H%M%S"',
+                        returnStdout: true
+                    ).trim()
+                }
+                
+                echo "Ì≥ã Git commit: ${env.GIT_COMMIT_SHORT}"
+                echo "‚è∞ Build timestamp: ${env.BUILD_TIMESTAMP}"
+            }
+        }
+        
+        stage('Validate') {
+            steps {
+                echo '‚úÖ Validating environment...'
+                
+                // Check if source folder exists
+                script {
+                    if (!fileExists("${SOURCE_FOLDER}")) {
+                        error "‚ùå Source folder '${SOURCE_FOLDER}' not found!"
+                    }
+                }
+                
+                // Count files to upload
+                script {
+                    def fileCount = sh(
+                        script: "find ${SOURCE_FOLDER} -type f | wc -l",
+                        returnStdout: true
+                    ).trim()
+                    echo "Ì≥ä Found ${fileCount} files to upload"
+                    
+                    if (fileCount.toInteger() == 0) {
+                        error "‚ùå No files found in source folder!"
+                    }
+                }
+                
+                // Test AWS access
+                sh '''
+                    echo "Ì¥ê Testing AWS credentials..."
+                    aws sts get-caller-identity
+                    
+                    echo "Ì∫£ Testing S3 bucket access..."
+                    aws s3 ls s3://${S3_BUCKET}/ > /dev/null
+                '''
+            }
+        }
+        
+        stage('Backup Current') {
+            when {
+                expression { params.DELETE_EXISTING == false }
+            }
+            steps {
+                echo 'Ì≤æ Creating backup of current S3 content...'
+                sh '''
+                    BACKUP_PREFIX="backup/${BUILD_TIMESTAMP}-${GIT_COMMIT_SHORT}/"
+                    
+                    # Check if there are existing files
+                    EXISTING_FILES=$(aws s3 ls s3://${S3_BUCKET}/${S3_PREFIX} --recursive | wc -l)
+                    
+                    if [ $EXISTING_FILES -gt 0 ]; then
+                        echo "Ì≥¶ Backing up $EXISTING_FILES existing files..."
+                        aws s3 cp s3://${S3_BUCKET}/${S3_PREFIX} s3://${S3_BUCKET}/${BACKUP_PREFIX} --recursive
+                        echo "‚úÖ Backup created at s3://${S3_BUCKET}/${BACKUP_PREFIX}"
+                    else
+                        echo "‚ÑπÔ∏è No existing files to backup"
+                    fi
+                '''
+            }
+        }
+        
+        stage('Clean S3 Destination') {
+            when {
+                expression { params.DELETE_EXISTING == true }
+            }
+            steps {
+                echo 'Ì∑ëÔ∏è Cleaning existing files in S3...'
+                sh '''
+                    aws s3 rm s3://${S3_BUCKET}/${S3_PREFIX} --recursive
+                    echo "‚úÖ Existing files removed"
+                '''
+            }
+        }
+        
+        stage('Upload to S3') {
+            steps {
+                echo 'Ì≥§ Uploading files to S3...'
+                sh '''
+                    cd ${SOURCE_FOLDER}
+                    
+                    echo "Ì≥Å Files to upload:"
+                    find . -type f -exec echo "  Ì≥Ñ {}" \\;
+                    
+                    # Upload with metadata
+                    aws s3 cp . s3://${S3_BUCKET}/${S3_PREFIX} \
+                        --recursive \
+                        --exclude "*.git*" \
+                        --exclude "*.DS_Store" \
+                        --exclude "Thumbs.db" \
+                        --metadata "build-number=${BUILD_NUMBER},git-commit=${GIT_COMMIT_SHORT},timestamp=${BUILD_TIMESTAMP}"
+                    
+                    echo "‚úÖ Upload completed"
+                '''
+            }
+        }
+        
+        stage('Verify Upload') {
+            steps {
+                echo 'Ì¥ç Verifying upload...'
+                sh '''
+                    echo "Ì≥ã Files in S3:"
+                    aws s3 ls s3://${S3_BUCKET}/${S3_PREFIX} --recursive --human-readable
+                    
+                    # Count uploaded files
+                    UPLOADED_COUNT=$(aws s3 ls s3://${S3_BUCKET}/${S3_PREFIX} --recursive | wc -l)
+                    echo "ÔøΩÔøΩ Total uploaded files: $UPLOADED_COUNT"
+                '''
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '''
+            Ìæâ ===============================================
+            Ìæâ DEPLOYMENT SUCCESSFUL!
+            Ìæâ ===============================================
+            '''
+            echo "‚úÖ Files from '${SOURCE_FOLDER}' uploaded to S3"
+            echo "Ì∫£ Bucket: ${S3_BUCKET}"
+            echo "Ì≥ç Prefix: ${S3_PREFIX}"
+            echo "Ìø∑Ô∏è Build: ${BUILD_NUMBER}"
+            echo "Ì≥ã Commit: ${env.GIT_COMMIT_SHORT}"
+        }
+        failure {
+            echo '''
+            ‚ùå ===============================================
+            ‚ùå DEPLOYMENT FAILED!
+            ‚ùå ===============================================
+            '''
+            echo "Ì≤• Check the console output above for details"
+        }
+        always {
+            echo "Ì∑π Cleaning up workspace..."
+            cleanWs()
+        }
+    }
+}
